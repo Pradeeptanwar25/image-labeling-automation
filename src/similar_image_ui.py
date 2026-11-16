@@ -6,6 +6,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from src.similarity_feedback import (
+    SimilarityFeedbackError,
+    SimilarityFeedbackStore,
+)
+
 from src.similar_image_finder import (
     SUPPORTED_EXTENSIONS,
     SimilarImageFinder,
@@ -26,6 +31,13 @@ def get_similarity_model():
     return SimilarImageFinder(
         model_name="facebook/dinov2-small"
     )
+
+
+@st.cache_resource(
+    show_spinner=False
+)
+def get_similarity_feedback_store():
+    return SimilarityFeedbackStore()
 
 
 def parse_reference_image_paths(
@@ -864,6 +876,60 @@ def display_similar_image_search():
             )
             return
 
+        saved_wrong_reference_paths = []
+        missing_wrong_memory_paths = []
+
+        try:
+            wrong_feedback_records = (
+                get_similarity_feedback_store()
+                .records(
+                    label="wrong"
+                )
+            )
+
+            seen_wrong_paths: set[str] = set()
+
+            for wrong_record in wrong_feedback_records:
+                raw_wrong_path = wrong_record.get(
+                    "image_path",
+                    "",
+                )
+
+                if not raw_wrong_path:
+                    continue
+
+                wrong_path = (
+                    Path(raw_wrong_path)
+                    .expanduser()
+                    .resolve()
+                )
+
+                wrong_key = str(
+                    wrong_path
+                ).casefold()
+
+                if wrong_key in seen_wrong_paths:
+                    continue
+
+                seen_wrong_paths.add(
+                    wrong_key
+                )
+
+                if wrong_path.is_file():
+                    saved_wrong_reference_paths.append(
+                        wrong_path
+                    )
+                else:
+                    missing_wrong_memory_paths.append(
+                        str(wrong_path)
+                    )
+
+        except SimilarityFeedbackError as exc:
+            st.warning(
+                "Saved Wrong memory could not be loaded: "
+                f"{exc}"
+            )
+
         try:
             root_path = (
                 Path(clean_root)
@@ -887,6 +953,49 @@ def display_similar_image_search():
                 f"{root_path}"
             )
             return
+
+        combined_negative_reference_paths = []
+        seen_combined_negative_paths: set[str] = set()
+
+        negative_sources = []
+
+        if exclude_negative_matches:
+            negative_sources.extend(
+                preview_negative_reference_paths
+            )
+
+        negative_sources.extend(
+            saved_wrong_reference_paths
+        )
+
+        for negative_path in negative_sources:
+            normalized_negative_path = (
+                Path(negative_path)
+                .expanduser()
+                .resolve()
+            )
+
+            negative_key = str(
+                normalized_negative_path
+            ).casefold()
+
+            if (
+                negative_key
+                in seen_combined_negative_paths
+            ):
+                continue
+
+            seen_combined_negative_paths.add(
+                negative_key
+            )
+
+            combined_negative_reference_paths.append(
+                normalized_negative_path
+            )
+
+        use_negative_exclusion = bool(
+            combined_negative_reference_paths
+        )
 
         try:
             with st.spinner(
@@ -914,12 +1023,12 @@ def display_similar_image_search():
                         blur_threshold
                     ),
                     negative_reference_images=(
-                        preview_negative_reference_paths
-                        if exclude_negative_matches
+                        combined_negative_reference_paths
+                        if use_negative_exclusion
                         else None
                     ),
                     exclude_negative_matches=(
-                        exclude_negative_matches
+                        use_negative_exclusion
                     ),
                     negative_similarity_threshold=float(
                         negative_similarity_threshold
@@ -937,6 +1046,32 @@ def display_similar_image_search():
                         minimum_reference_agreement
                     ),
                 )
+
+            result[
+                "saved_wrong_memory_count"
+            ] = len(
+                saved_wrong_reference_paths
+            )
+
+            result[
+                "manual_negative_reference_count"
+            ] = len(
+                preview_negative_reference_paths
+                if exclude_negative_matches
+                else []
+            )
+
+            result[
+                "combined_negative_reference_count"
+            ] = len(
+                combined_negative_reference_paths
+            )
+
+            result[
+                "missing_wrong_memory_count"
+            ] = len(
+                missing_wrong_memory_paths
+            )
 
             st.session_state[
                 "similar_search_result"
@@ -1091,6 +1226,57 @@ def display_similar_image_search():
             0,
         ),
     )
+
+    wrong_memory_columns = st.columns(
+        3
+    )
+
+    wrong_memory_columns[0].metric(
+        "Saved Wrong Memory",
+        result.get(
+            "saved_wrong_memory_count",
+            0,
+        ),
+    )
+
+    wrong_memory_columns[1].metric(
+        "Manual Negatives",
+        result.get(
+            "manual_negative_reference_count",
+            0,
+        ),
+    )
+
+    wrong_memory_columns[2].metric(
+        "Total Negative Memory",
+        result.get(
+            "combined_negative_reference_count",
+            result.get(
+                "negative_reference_count",
+                0,
+            ),
+        ),
+    )
+
+    if result.get(
+        "saved_wrong_memory_count",
+        0,
+    ):
+        st.caption(
+            "Previously marked Wrong images were "
+            "automatically reused as hard-negative "
+            "references for this search."
+        )
+
+    if result.get(
+        "missing_wrong_memory_count",
+        0,
+    ):
+        st.warning(
+            "Some saved Wrong image paths are no "
+            "longer available: "
+            f"{result.get('missing_wrong_memory_count', 0)}"
+        )
 
     negative_columns = st.columns(
         3
@@ -1391,12 +1577,322 @@ def display_similar_image_search():
     )
 
     # =====================================================
+    # SIMILARITY FEEDBACK
+    # =====================================================
+
+    try:
+        feedback_store = (
+            get_similarity_feedback_store()
+        )
+
+        feedback_summary = (
+            feedback_store.summary()
+        )
+
+        st.markdown(
+            "### Similarity Feedback"
+        )
+
+        feedback_columns = st.columns(
+            4
+        )
+
+        feedback_columns[0].metric(
+            "Correct",
+            feedback_summary.get(
+                "correct",
+                0,
+            ),
+        )
+
+        feedback_columns[1].metric(
+            "Wrong",
+            feedback_summary.get(
+                "wrong",
+                0,
+            ),
+        )
+
+        feedback_columns[2].metric(
+            "Skipped",
+            feedback_summary.get(
+                "skip",
+                0,
+            ),
+        )
+
+        feedback_columns[3].metric(
+            "Trainable",
+            feedback_summary.get(
+                "trainable",
+                0,
+            ),
+        )
+
+        st.caption(
+            "Correct aur Wrong labels future "
+            "similarity classifier training ke "
+            "liye use honge. Original images "
+            "modify nahi hongi."
+        )
+
+    except SimilarityFeedbackError as exc:
+        feedback_store = None
+
+        st.error(
+            "Could not load similarity feedback: "
+            f"{exc}"
+        )
+
+    # =====================================================
     # MATCH PREVIEWS
     # =====================================================
 
-    display_match_previews(
-        matches
+    st.markdown(
+        "### Similar Image Results"
     )
+
+    st.caption(
+        "Wrong images select karo. Multiple images "
+        "select karne ke baad ek baar Save Selected "
+        "Feedback press karo. Selection ke time app "
+        "rerun ya disk-write nahi karega."
+    )
+
+    feedback_store = (
+        get_similarity_feedback_store()
+    )
+
+    label_options = [
+        "Unmarked",
+        "Wrong",
+        "Correct",
+        "Skip",
+    ]
+
+    label_to_value = {
+        "Unmarked": None,
+        "Wrong": "wrong",
+        "Correct": "correct",
+        "Skip": "skip",
+    }
+
+    saved_label_display = {
+        None: "Unmarked",
+        "wrong": "Wrong",
+        "correct": "Correct",
+        "skip": "Skip",
+    }
+
+    with st.form(
+        "similarity_batch_feedback_form",
+        clear_on_submit=False,
+    ):
+        selected_feedback: list[
+            tuple[
+                dict,
+                str,
+            ]
+        ] = []
+
+        columns_per_row = 3
+
+        for start_index in range(
+            0,
+            len(matches),
+            columns_per_row,
+        ):
+            current_matches = matches[
+                start_index:
+                start_index
+                + columns_per_row
+            ]
+
+            result_columns = st.columns(
+                len(current_matches)
+            )
+
+            for column, match in zip(
+                result_columns,
+                current_matches,
+            ):
+                with column:
+                    image_path = Path(
+                        match.get(
+                            "image_path",
+                            "",
+                        )
+                    )
+
+                    if image_path.is_file():
+                        st.image(
+                            str(image_path),
+                            width=180,
+                        )
+                    else:
+                        st.warning(
+                            "Image file missing."
+                        )
+
+                    st.caption(
+                        match.get(
+                            "relative_path",
+                            image_path.name,
+                        )
+                    )
+
+                    final_score = float(
+                        match.get(
+                            "final_similarity_percent",
+                            match.get(
+                                "similarity_percent",
+                                0,
+                            ),
+                        )
+                    )
+
+                    st.markdown(
+                        f"**Final score: "
+                        f"{final_score:.2f}%**"
+                    )
+
+                    references_agreed = int(
+                        match.get(
+                            "references_agreed",
+                            0,
+                        )
+                    )
+
+                    reference_count = int(
+                        match.get(
+                            "reference_count",
+                            0,
+                        )
+                    )
+
+                    if reference_count:
+                        st.caption(
+                            "Reference agreement: "
+                            f"{references_agreed}/"
+                            f"{reference_count}"
+                        )
+
+                    current_label = (
+                        feedback_store.get_label(
+                            image_path
+                        )
+                    )
+
+                    current_display = (
+                        saved_label_display.get(
+                            current_label,
+                            "Unmarked",
+                        )
+                    )
+
+                    selected_index = (
+                        label_options.index(
+                            current_display
+                        )
+                    )
+
+                    safe_key = (
+                        str(image_path)
+                        .encode(
+                            "utf-8"
+                        )
+                        .hex()[-48:]
+                    )
+
+                    selected_label = st.selectbox(
+                        "Review",
+                        options=label_options,
+                        index=selected_index,
+                        key=(
+                            "inline_feedback_"
+                            + safe_key
+                        ),
+                    )
+
+                    selected_feedback.append(
+                        (
+                            match,
+                            selected_label,
+                        )
+                    )
+
+        save_feedback = st.form_submit_button(
+            "Save Selected Feedback",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if save_feedback:
+        batch_updates = []
+
+        for match, selected_label in (
+            selected_feedback
+        ):
+            normalized_label = (
+                label_to_value.get(
+                    selected_label
+                )
+            )
+
+            if normalized_label is None:
+                continue
+
+            image_path = Path(
+                match.get(
+                    "image_path",
+                    "",
+                )
+            )
+
+            current_label = (
+                feedback_store.get_label(
+                    image_path
+                )
+            )
+
+            if current_label == normalized_label:
+                continue
+
+            batch_updates.append(
+                {
+                    "image_path": str(
+                        image_path
+                    ),
+                    "label": normalized_label,
+                    "similarity_result": match,
+                }
+            )
+
+        if not batch_updates:
+            st.info(
+                "No new feedback changes selected."
+            )
+        else:
+            try:
+                batch_result = (
+                    feedback_store.set_labels_batch(
+                        batch_updates
+                    )
+                )
+
+                st.success(
+                    "Feedback saved in one batch: "
+                    f"{batch_result.get('saved_count', 0)} "
+                    "image(s)."
+                )
+
+                st.rerun()
+
+            except SimilarityFeedbackError as exc:
+                st.error(
+                    "Could not save batch feedback: "
+                    f"{exc}"
+                )
 
     # =====================================================
     # FAILED IMAGES

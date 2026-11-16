@@ -943,8 +943,6 @@ class SimilarImageFinder:
                     rejected_by_negative = (
                         best_negative_similarity
                         >= validated_negative_threshold
-                        and negative_difference
-                        >= validated_negative_margin
                     )
 
                 if rejected_by_negative:
@@ -1019,8 +1017,9 @@ class SimilarImageFinder:
                                 4,
                             ),
                             "reason": (
-                                "Closer to excluded "
-                                "negative reference"
+                                "Hard excluded: negative "
+                                "reference similarity passed "
+                                "the exclusion threshold"
                             ),
                             "negative_reference_scores": (
                                 sorted(
