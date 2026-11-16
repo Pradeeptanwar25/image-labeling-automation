@@ -1,0 +1,4 @@
+label_file: "Ericson_classification label.txt"
+mapping_file: "config/label_mapping.json"
+supported_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+output_dir: "output"

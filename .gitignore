@@ -1,0 +1,23 @@
+﻿# Local backup Python files
+*_before_*.py
+*_backup*.py
+*backup_*.py
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Temporary files
+*.tmp
+
+# Local config backups
+*_before_*.json
+
+# Unused local file
+src/-image_csv_sync.py
